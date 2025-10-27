@@ -48,6 +48,26 @@ streamlit run chat_with_pdf.py
 - Upload documents - Ask multiple questions in sequence
 - Expected: Chat history maintained, clear UI feedback, source citations per response
 
+## Changes from Provided Template
+
+### Modified Files
+
+1. **requirements.txt**
+   - Added `chromadb>=0.4.0` for vector storage
+   - Added `langchain-chroma>=0.1.0` for ChromaDB integration
+   - Added `langchain-text-splitters>=0.3.0` for document chunking
+
+2. **chat_with_pdf.py**
+   - Complete rewrite implementing full RAG pipeline
+   - Added multi-file upload support
+   - Added PDF processing capability
+   - Implemented document chunking with RecursiveCharacterTextSplitter
+   - Integrated ChromaDB vector store
+   - Added retrieval and generation pipeline
+   - Enhanced UI with source citations and better feedback
+
+### No Changes to `.devcontainer`
+
 ## Overview
 This application is a Retrieval-Augmented Generation (RAG) system that allows users to upload documents (.txt and .pdf files) and interact with their content through a conversational interface. The application uses LangChain for the RAG pipeline, ChromaDB for vector storage, and Streamlit for the user interface.
 
@@ -121,26 +141,6 @@ model="openai.gpt-4o"    # LLM for response generation
 temperature=0.2          # Lower = more focused responses
 embedding="text-embedding-3-large"  # Embedding model
 ```
-
-## Changes from Provided Template
-
-### Modified Files
-
-1. **requirements.txt**
-   - Added `chromadb>=0.4.0` for vector storage
-   - Added `langchain-chroma>=0.1.0` for ChromaDB integration
-   - Added `langchain-text-splitters>=0.3.0` for document chunking
-
-2. **chat_with_pdf.py**
-   - Complete rewrite implementing full RAG pipeline
-   - Added multi-file upload support
-   - Added PDF processing capability
-   - Implemented document chunking with RecursiveCharacterTextSplitter
-   - Integrated ChromaDB vector store
-   - Added retrieval and generation pipeline
-   - Enhanced UI with source citations and better feedback
-
-### No Changes to `.devcontainer`
 
 ## File Structure
 
