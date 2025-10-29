@@ -157,8 +157,6 @@ INFO-5940-Codespace/
 └── .devcontainer/                # Codespace configuration
 ```
 
-## Technical Details
-
 ### LangChain Components Used
 - `TextLoader`: For loading .txt files
 - `PyPDFLoader`: For loading .pdf files
