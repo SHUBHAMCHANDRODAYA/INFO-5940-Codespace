@@ -3,7 +3,7 @@ import os
 from openai import OpenAI
 from os import environ
 
-# LangChain imports for RAG pipeline
+# imports for RAG pipeline components
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -15,13 +15,14 @@ import shutil
 from typing import List
 
 
-# Initial configurations for the OpenAI client and LLM
-client = OpenAI(
+# Initial configurations for the OpenAI client and model
+openai_client = OpenAI(
     api_key=os.environ.get("OPENAI_API_KEY", ""),
     base_url="https://api.ai.it.cornell.edu",
 )
 
-llm = ChatOpenAI(
+# Primary chat model used for responses
+conversational_model = ChatOpenAI(
     model="openai.gpt-4o",
     temperature=0.2,
     api_key=os.environ.get("OPENAI_API_KEY", ""),
@@ -29,14 +30,14 @@ llm = ChatOpenAI(
 )
 
 
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
+CHUNK_CHARACTER_LIMIT = 1000
+CHUNK_CHARACTER_OVERLAP = 200
 
 
-TOP_K_CHUNKS = 5
+TOP_K_RETRIEVAL = 5
 
 
-def load_document(uploaded_file) -> List[Document]:
+def load_uploaded_document(uploaded_file) -> List[Document]:
     """
     Load a document from an uploaded file.
     
@@ -67,17 +68,16 @@ def load_document(uploaded_file) -> List[Document]:
         
         documents = loader.load()
         
-        # Add filename to metadata for source tracking
+        # Adding filename to metadata for source tracking
         for doc in documents:
             doc.metadata['source'] = uploaded_file.name
             
         return documents
     finally:
-        # Clean up temporary file
         os.unlink(tmp_file_path)
 
 
-def chunk_documents(documents: List[Document]) -> List[Document]:
+def split_into_chunks(documents: List[Document]) -> List[Document]:
     """
     Split documents into smaller chunks for efficient retrieval.
     
@@ -91,8 +91,8 @@ def chunk_documents(documents: List[Document]) -> List[Document]:
         List of chunked Document objects
     """
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=CHUNK_CHARACTER_LIMIT,
+        chunk_overlap=CHUNK_CHARACTER_OVERLAP,
         length_function=len,
         separators=["\n\n", "\n", " ", ""]
     )
@@ -101,9 +101,9 @@ def chunk_documents(documents: List[Document]) -> List[Document]:
     return chunks
 
 
-def create_vectorstore(chunks: List[Document]) -> Chroma:
+def build_vectorstore(chunks: List[Document]) -> Chroma:
     """
-    Create a ChromaDB vector store from document chunks.
+    ChromaDB vector store from document chunks.
     
     Embeds all chunks using OpenAI embeddings and stores them in ChromaDB
     for efficient similarity search.
@@ -128,7 +128,7 @@ def create_vectorstore(chunks: List[Document]) -> Chroma:
     return vectorstore
 
 
-def format_docs(docs: List[Document]) -> str:
+def join_documents(docs: List[Document]) -> str:
     """
     Format retrieved documents into a single context string.
     
@@ -139,6 +139,19 @@ def format_docs(docs: List[Document]) -> str:
         Formatted string with all document contents
     """
     return "\n\n".join(doc.page_content for doc in docs)
+
+
+def ensure_session_defaults() -> None:
+    if 'vectorstore' not in st.session_state:
+        st.session_state.vectorstore = None
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+    if 'total_chunks' not in st.session_state:
+        st.session_state.total_chunks = 0
+    if 'document_names' not in st.session_state:
+        st.session_state.document_names = []
+    if 'num_documents' not in st.session_state:
+        st.session_state.num_documents = 0
 
 
 def generate_rag_response(question: str, vectorstore: Chroma) -> tuple[str, List[Document]]:
@@ -156,28 +169,59 @@ def generate_rag_response(question: str, vectorstore: Chroma) -> tuple[str, List
         Tuple of (response text, list of source documents)
     """
     # Retrieve relevant chunks
-    retrieved_docs = vectorstore.similarity_search(question, k=TOP_K_CHUNKS)
+    retrieved_docs = vectorstore.similarity_search(question, k=TOP_K_RETRIEVAL)
     
     # Format context from retrieved documents
-    context = format_docs(retrieved_docs)
+    context = join_documents(retrieved_docs)
     
-    # Creating prompt template
-    template = """You are a helpful assistant for question-answering tasks. 
-Use the following pieces of retrieved context to answer the question. 
-If you don't know the answer based on the context, just say that you don't know. 
-Keep the answer concise and accurate.
+    # Compute document inventory from session (if available)
+    document_names = st.session_state.get("document_names", [])
+    num_documents = st.session_state.get("num_documents", len(set([d.metadata.get("source", "Unknown") for d in retrieved_docs])))
+    doc_list_str = ", ".join(document_names) if document_names else ", ".join(sorted(set([d.metadata.get("source", "Unknown") for d in retrieved_docs])))
 
-Question: {question}
+    # Creating prompt template per requested guidance
+    template = """
+You are a careful assistant that answers ONLY from the retrieved context.
 
-Context: {context}
+RULES
+1) Grounding: Use information ONLY from “Retrieved Snippets” below. Do NOT rely on outside knowledge.
+2) Citations: After any non-trivial fact, add citation markers like [S1], [S3]. If multiple snippets support a statement, cite them all, e.g., [S2,S5].
+3) Conflicts: If snippets conflict, prefer the one that is (i) more specific, (ii) directly on-topic, and (iii) later/explicitly dated. Briefly note the discrepancy.
+4) Gaps: If the answer is not in the snippets, say: “I can’t find this in the provided documents.” Optionally suggest ONE precise follow-up the user could ask.
+5) Multi-doc: If multiple sources contribute, name all of the sources that contributed to the answer with references.
+6) Numbers & small calculations: Quote numbers verbatim; show any tiny calculation inline (e.g., “12 + 8 = 20”). Never invent numbers.
+7) Definitions: Define a term only if a definition appears in snippets; otherwise state that the term isn’t defined in the provided documents.
+8) Lists/Counts: If asked to list or count, report exactly what appears in the snippets and say if the list may be partial.
+9) Tone/Length: Be concise (3–7 sentences unless the user asked for more). Use Markdown.
+10) When asked to summarize, summarize the content from both documents in a numbered list, unless asked to summarize from a specific document.
 
-Answer:"""
+DOCUMENT INVENTORY
+- Total documents: {num_documents}
+- Document names: {document_names}
+
+QUESTION
+{question}
+
+RETRIEVED SNIPPETS
+Numbered S1..Sk in the order given. Each snippet may include its source name and page if available.
+
+{context}
+
+RESPONSE FORMAT
+- **Answer:** concise answer with inline [S#] citations.
+- **Sources:** bullet list “S# — <source name> (page if known)” for every S# you cited, in order of first appearance.
+"""
     
     prompt = PromptTemplate.from_template(template)
     
-    # Generating response
-    messages = prompt.invoke({"question": question, "context": context})
-    response = llm.invoke(messages.text)
+    # Generating output
+    messages = prompt.invoke({
+        "question": question,
+        "context": context,
+        "num_documents": num_documents,
+        "document_names": doc_list_str,
+    })
+    response = conversational_model.invoke(messages.text)
     
     return response.content, retrieved_docs
 
@@ -186,18 +230,182 @@ Answer:"""
 
 st.set_page_config(
     page_title="RAG Chat Application",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.title("RAG-based Document Chat - SC3455")
-st.markdown("Upload documents and ask questions about their content!")
+# Custom CSS for enhanced UI
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(90deg, #2d3748 0%, #4a5568 100%);
+        padding: 2rem;
+        border-radius: 10px;
+        color: #e2e8f0;
+        text-align: center;
+        margin-bottom: 2rem;
+        border: 1px solid #4a5568;
+    }
+    
+    .main-header h1 {
+        color: #e2e8f0;
+        margin: 0;
+        font-size: 2.5rem;
+        font-weight: 700;
+    }
+    
+    .main-header p {
+        color: #cbd5e0;
+        margin: 0.5rem 0 0 0;
+        font-size: 1.2rem;
+    }
+    
+    .sidebar-header {
+        background: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
+        padding: 1rem;
+        border-radius: 8px;
+        color: #e2e8f0;
+        margin-bottom: 1rem;
+        border: 1px solid #4a5568;
+    }
+    
+    .sidebar-header h3 {
+        color: #e2e8f0;
+        margin: 0;
+        font-size: 1.3rem;
+    }
+    
+    .status-card {
+        background: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
+        padding: 1rem;
+        border-radius: 8px;
+        color: #e2e8f0;
+        margin: 1rem 0;
+        border: 1px solid #4a5568;
+    }
+    
+    .settings-card {
+        background: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #68d391;
+        margin: 1rem 0;
+        color: #e2e8f0;
+        border: 1px solid #4a5568;
+    }
+    
+    .chat-container {
+        background: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
+        border-radius: 10px;
+        padding: 1rem;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        margin: 1rem 0;
+        border: 1px solid #4a5568;
+        color: #e2e8f0;
+    }
+    
+    .footer {
+        background: linear-gradient(90deg, #2d3748 0%, #4a5568 100%);
+        padding: 1rem;
+        border-radius: 8px;
+        color: #e2e8f0;
+        text-align: center;
+        margin-top: 2rem;
+        border: 1px solid #4a5568;
+    }
+    
+    .stButton > button {
+        background: linear-gradient(90deg, #68d391 0%, #48bb78 100%);
+        color: #1a202c;
+        border: none;
+        border-radius: 8px;
+        padding: 0.5rem 1rem;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 2px 8px rgba(104, 211, 145, 0.4);
+    }
+    
+    .stExpander {
+        background: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
+        border-radius: 8px;
+        border: 1px solid #4a5568;
+        color: #e2e8f0;
+    }
+    
+    .stSuccess {
+        background: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
+        color: #68d391;
+        padding: 1rem;
+        border-radius: 8px;
+        border: 1px solid #68d391;
+    }
+    
+    .stInfo {
+        background: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
+        color: #63b3ed;
+        padding: 1rem;
+        border-radius: 8px;
+        border: 1px solid #63b3ed;
+    }
+    
+    .stError {
+        background: linear-gradient(135deg, #2d3748 0%, #4a5568 100%);
+        color: #fc8181;
+        padding: 1rem;
+        border-radius: 8px;
+        border: 1px solid #fc8181;
+    }
+    
+    .main .block-container {
+        background: #1a202c;
+        padding: 2rem;
+        border-radius: 10px;
+        color: #e2e8f0;
+    }
+    
+    .stApp {
+        background: #1a202c;
+    }
+    
+    .stMarkdown {
+        color: #e2e8f0;
+    }
+    
+    .stTextInput > div > div > input {
+        background: #2d3748;
+        color: #e2e8f0;
+        border: 1px solid #4a5568;
+    }
+    
+    .stTextInput > div > div > input:focus {
+        border-color: #68d391;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Main header
+st.markdown("""
+<div class="main-header">
+    <h1>Document Chatbot</h1>
+    <p>Upload documents and ask questions about their content with AI-powered RAG based document retrieval</p>
+</div>
+""", unsafe_allow_html=True)
 
 
-# Sidebar for Document Upload
-
-with st.sidebar:
-    st.header("Document Upload")
-    st.markdown("Upload one or more documents (.txt or .pdf)")
+# Centered uploader section (replaces sidebar)
+col_left, col_center, col_right = st.columns([1, 2, 1])
+with col_center:
+    st.markdown("""
+    <div class="sidebar-header">
+        <h3>Document Upload</h3>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("**Upload one or more documents (.txt or .pdf)**")
     
     # File uploader supporting multiple files
     uploaded_files = st.file_uploader(
@@ -209,35 +417,50 @@ with st.sidebar:
     
     # Display uploaded files
     if uploaded_files:
-        st.success(f"{len(uploaded_files)} file(s) uploaded")
-        with st.expander("View uploaded files"):
+        st.markdown(f"""
+        <div class="status-card">
+            <strong>{len(uploaded_files)} file(s) uploaded successfully!</strong>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.expander("View uploaded files", expanded=False):
             for file in uploaded_files:
-                st.write(f"- {file.name} ({file.size} bytes)")
+                st.write(f"{file.name} ({file.size:,} bytes)")
     
-    # Process documents button
-    process_button = st.button("Process Documents", type="primary", use_container_width=True)
+    # Upload documents button
+    process_button = st.button("Upload Documents", type="primary", use_container_width=True)
     
     # Show processing status
     if 'vectorstore' in st.session_state and st.session_state.vectorstore is not None:
-        st.success("Documents processed and ready!")
+        st.markdown(f"""
+        <div class="status-card">
+            <strong>Documents processed and ready!</strong>
+        </div>
+        """, unsafe_allow_html=True)
+        
         if 'total_chunks' in st.session_state:
-            st.info(f"Total chunks: {st.session_state.total_chunks}")
+            st.markdown(f"""
+            <div class="status-card">
+                <strong>Total chunks: {st.session_state.total_chunks}</strong>
+            </div>
+            """, unsafe_allow_html=True)
     
     # Settings expander
-    with st.expander("Settings"):
-        st.markdown(f"**Chunk Size:** {CHUNK_SIZE}")
-        st.markdown(f"**Chunk Overlap:** {CHUNK_OVERLAP}")
-        st.markdown(f"**Retrieval K:** {TOP_K_CHUNKS}")
+    with st.expander("Configuration Settings", expanded=False):
+        st.markdown("""
+        <div class="settings-card">
+            <strong>Current Settings</strong><br><br>
+            <strong>Chunk Size:</strong> {chunk_size}<br>
+            <strong>Chunk Overlap:</strong> {chunk_overlap}<br>
+            <strong>Retrieval K:</strong> {top_k}
+        </div>
+        """.format(chunk_size=CHUNK_CHARACTER_LIMIT, chunk_overlap=CHUNK_CHARACTER_OVERLAP, top_k=TOP_K_RETRIEVAL), 
+        unsafe_allow_html=True)
 
 # Document Processing
 
 # Initialize session state
-if 'vectorstore' not in st.session_state:
-    st.session_state.vectorstore = None
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
-if 'total_chunks' not in st.session_state:
-    st.session_state.total_chunks = 0
+ensure_session_defaults()
 
 # Processing documents flow when button is clicked
 if process_button and uploaded_files:
@@ -247,28 +470,39 @@ if process_button and uploaded_files:
             
             # Load all uploaded files
             for uploaded_file in uploaded_files:
-                docs = load_document(uploaded_file)
+                docs = load_uploaded_document(uploaded_file)
                 all_documents.extend(docs)
             
             # Chunk documents
-            chunks = chunk_documents(all_documents)
+            chunks = split_into_chunks(all_documents)
             st.session_state.total_chunks = len(chunks)
             
             # Create vector store
-            st.session_state.vectorstore = create_vectorstore(chunks)
+            st.session_state.vectorstore = build_vectorstore(chunks)
+            
+            # Persist document inventory for future questions
+            unique_sources = sorted({doc.metadata.get('source', 'Unknown') for doc in all_documents})
+            st.session_state.document_names = unique_sources
+            st.session_state.num_documents = len(unique_sources)
             
             # Clear previous chat messages when new documents are processed
             st.session_state.messages = []
             
-            st.success(f"Successfully processed {len(uploaded_files)} document(s) into {len(chunks)} chunks!")
+            st.markdown(f"""
+            <div class="status-card">
+                <strong>Successfully processed {len(uploaded_files)} document(s) into {len(chunks)} chunks!</strong>
+            </div>
+            """, unsafe_allow_html=True)
             st.rerun()
             
         except Exception as e:
-            st.error(f"Error processing documents: {str(e)}")
+            st.markdown(f"""
+            <div class="status-card" style="background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%); color: #991b1b;">
+                <strong>Error processing documents: {str(e)}</strong>
+            </div>
+            """, unsafe_allow_html=True)
 
 # Chat Interface
-
-st.markdown("---")
 
 # Display chat messages
 for message in st.session_state.messages:
@@ -277,7 +511,7 @@ for message in st.session_state.messages:
         
         # Show sources if available
         if message["role"] == "assistant" and "sources" in message:
-            with st.expander("View Sources"):
+            with st.expander("View Sources", expanded=False):
                 for i, doc in enumerate(message["sources"], 1):
                     source = doc.metadata.get('source', 'Unknown')
                     st.markdown(f"**Source {i}:** {source}")
@@ -285,7 +519,7 @@ for message in st.session_state.messages:
 
 # Chat input
 if st.session_state.vectorstore is not None:
-    question = st.chat_input("Ask a question about your documents...")
+    question = st.chat_input("enter your query")
     
     if question:
         # Add user message to chat
@@ -304,7 +538,7 @@ if st.session_state.vectorstore is not None:
                     st.markdown(response)
                     
                     # Show sources
-                    with st.expander("View Sources"):
+                    with st.expander("View Sources", expanded=False):
                         for i, doc in enumerate(sources, 1):
                             source = doc.metadata.get('source', 'Unknown')
                             st.markdown(f"**Source {i}:** {source}")
@@ -325,17 +559,4 @@ if st.session_state.vectorstore is not None:
                         "content": error_msg
                     })
 else:
-    # Show instructions when no documents are uploaded
-    st.info("Please upload documents using the sidebar and click 'Process Documents' to start chatting!")
-
-# Footer
-
-st.markdown("---")
-st.markdown(
-    """
-    <div style='text-align: center; color: gray; font-size: 0.9em;'>
-    Built with Streamlit, LangChain, and ChromaDB
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+    pass

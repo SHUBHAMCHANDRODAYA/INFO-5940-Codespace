@@ -2,8 +2,6 @@
 
 ## Assignment 1: RAG-based Document Chat Application
 
-This document logs all external sources and tools used in completing this assignment.
-
 ---
 
 ## Architecture & RAG Pipeline
@@ -192,6 +190,7 @@ The application implements a complete Retrieval-Augmented Generation (RAG) pipel
 2. **Visual Studio Code**
    - Code editor (via Codespaces browser interface)
    - Extensions: Python, Jupyter
+   - Cline
 
 3. **Git**
    - Version control
@@ -232,7 +231,7 @@ The application implements a complete Retrieval-Augmented Generation (RAG) pipel
 
 
 ## GenAI usage
-For syntax usages and formatting
+For syntax usages, formatting and UI/CSS
 
 ---
 

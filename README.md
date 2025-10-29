@@ -4,7 +4,7 @@
 
 ### Run the Application
 
-**Method 1: Set API key in command (Recommended)**
+**Method 1: Set API key in command**
 ```bash
 export OPENAI_API_KEY="your_actual_API_KEY" 
 export OPENAI_BASE_URL="https://api.ai.it.cornell.edu" 
