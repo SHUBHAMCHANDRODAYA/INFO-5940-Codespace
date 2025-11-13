@@ -125,7 +125,7 @@ def internet_search(query: str) -> str:
 
 # BEGIN SOLUTION
 REVIEWER_INSTRUCTIONS = """
-You are the Reviewer Agent in a two-step travel-planning workflow. Your job is to validate andstress-test the Planner's itinerary before the traveler sees it.
+You are the Reviewer Agent in a two-step travel-planning workflow. Your job is to validate and stress-test the Planner's itinerary before the traveler sees it.
 
 Responsibilities:
 - Audit feasibility: opening hours, seasonal closures, realistic transit times, and cost alignment.
